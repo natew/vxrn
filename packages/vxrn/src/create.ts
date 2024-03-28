@@ -1,19 +1,21 @@
 import { readFile } from 'fs/promises'
-import { dirname, join, relative } from 'path'
+import { basename, dirname, extname, join, relative } from 'path'
 
 import * as babel from '@babel/core'
-import viteReactPlugin, { swcTransform, transformForBuild } from '@vxrn/vite-native-swc'
 import react from '@vitejs/plugin-react-swc'
+import viteReactPlugin, { swcTransform, transformForBuild } from '@vxrn/vite-native-swc'
+import { createHash } from 'crypto'
 import { parse } from 'es-module-lexer'
-import { pathExists } from 'fs-extra'
 import { InlineConfig, build, createServer, mergeConfig, resolveConfig } from 'vite'
 
+import copy from 'rollup-plugin-copy'
 import { clientInjectionsPlugin } from './dev/clientInjectPlugin'
 import { createDevServer } from './dev/createDevServer'
-import { HMRListener } from './types'
-import { StartOptions } from './types'
-import { nativePlugin } from './nativePlugin'
 import { getVitePath } from './getVitePath'
+import { nativePlugin } from './nativePlugin'
+import { HMRListener, StartOptions } from './types'
+import { SCALABLE_ASSETS, getImageSize } from './utils/assets'
+import readDirectory from './utils/readDirectory'
 
 export const create = async (options: StartOptions) => {
   const { host = '127.0.0.1', root, nativePort = 8081, webPort } = options
@@ -166,6 +168,7 @@ export const create = async (options: StartOptions) => {
   // this fakes vite into thinking its loading files, so it hmrs in native mode despite not requesting
   viteServer.watcher.addListener('change', async (path) => {
     const id = path.replace(process.cwd(), '')
+    // TODO: add proper support for hot reloading assets
     if (!id.endsWith('tsx') && !id.endsWith('jsx')) {
       return
     }
@@ -214,18 +217,6 @@ export const create = async (options: StartOptions) => {
   }
 
   async function getBundleCode() {
-    if (process.env.LOAD_TMP_BUNDLE) {
-      // for easier quick testing things:
-      const tmpBundle = join(process.cwd(), 'bundle.tmp.js')
-      if (await pathExists(tmpBundle)) {
-        console.info(
-          '⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️ returning temp bundle ⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️',
-          tmpBundle
-        )
-        return await readFile(tmpBundle, 'utf-8')
-      }
-    }
-
     if (isBuilding) {
       const res = await isBuilding
       return res
@@ -243,6 +234,11 @@ export const create = async (options: StartOptions) => {
         'utf-8'
       ),
     } as const
+
+    const staticAssets = await readDirectory(
+      dirname(require.resolve('@vxrn/react-native-prebuilt')),
+      true
+    )
 
     const virtualModules = {
       'react-native': {
@@ -338,6 +334,33 @@ export const create = async (options: StartOptions) => {
           tsDecorators: true,
           mode: 'build',
         }),
+        {
+          name: 'assets',
+          async transform(_, id) {
+            const extension = extname(id)
+            const hash = createHash('md5').update(id).digest('hex')
+
+            const { width, height } = getImageSize(id)
+
+            if (new RegExp(`\\.(${SCALABLE_ASSETS.join('|')})$`).test(extension)) {
+              return `
+              import AssetRegistry from "react-native/Libraries/Image/AssetRegistry";
+
+              export default AssetRegistry.registerAsset({
+                __packager_asset: true,
+                scales: [1], 
+                name: ${JSON.stringify(basename(id))},
+                type: ${JSON.stringify(extension)},
+                hash: ${JSON.stringify(hash)},
+                httpServerLocation: ${JSON.stringify(join('assets', relative(root, id)))},
+                fileSystemLocation: ${JSON.stringify(id)},
+                height: ${JSON.stringify(width)},
+                width: ${JSON.stringify(height)}
+              });
+              `
+            }
+          },
+        },
       ],
       appType: 'custom',
       root,
@@ -356,6 +379,27 @@ export const create = async (options: StartOptions) => {
             preserveModules: true,
             format: 'cjs',
           },
+          plugins: [
+            // for development purposes, `react-native` contains few assets,
+            // TODO: figure out unified way for this, so all libraries containing assets would work
+            copy({
+              hook: 'generateBundle',
+              targets: staticAssets.map((path) => {
+                return {
+                  src: path,
+                  dest: join(
+                    options.root,
+                    'dist',
+                    'assets',
+                    dirname(path).replace(
+                      dirname(require.resolve('@vxrn/react-native-prebuilt')),
+                      ''
+                    )
+                  ),
+                }
+              }),
+            }),
+          ],
         },
       },
 
