@@ -54,8 +54,7 @@ export const dev = async ({ clean, ...rest }: VXRNOptions & { clean?: boolean })
       })
     } catch (err) {
       if (err instanceof Error) {
-        // @ts-expect-error wtf
-        if (err.code !== 'ENOENT') {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
           throw Error
         }
       }
